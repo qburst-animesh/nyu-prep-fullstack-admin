@@ -16,10 +16,8 @@ app = FastAPI(title="CSV Cloud Infrastructure Backend", version="1.0.0")
 s3 = S3Service()
 
 # CORS configuration targeting your MUI React Admin Framework
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+origins_str = os.getenv("CORS_ORIGINS", "http://localhost:3000")
+origins = [origin.strip() for origin in origins_str.split(",")]
 
 app.add_middleware(
     CORSMiddleware,
