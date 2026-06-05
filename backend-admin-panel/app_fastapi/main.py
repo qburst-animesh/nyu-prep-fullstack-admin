@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List
 import uuid
+import os
 
 from .database import engine, Base, get_db
 from . import models, schemas
