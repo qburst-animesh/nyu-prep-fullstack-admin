@@ -4,7 +4,6 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from dotenv import load_dotenv
 
 load_dotenv()
-# DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/csv_db")
 DATABASE_URL = os.getenv("DATABASE_URL") 
 
 
