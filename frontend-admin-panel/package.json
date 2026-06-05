@@ -1,36 +1,32 @@
 {
-  "name": "admin-panel",
-  "version": "0.1.0",
+  "name": "frontend-admin-panel",
   "private": true,
-  "dependencies": {
-    "@aws-amplify/ui-react": "^6.15.4",
-    "@emotion/react": "^11.14.0",
-    "@emotion/styled": "^11.14.1",
-    "@mui/icons-material": "^9.0.1",
-    "@mui/material": "^9.0.1",
-    "@mui/x-data-grid": "^9.3.0",
-    "@testing-library/dom": "^10.4.1",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^13.5.0",
-    "aws-amplify": "^6.17.0",
-    "axios": "^1.17.0",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "react-scripts": "5.0.1",
-    "web-vitals": "^2.1.4"
-  },
+  "version": "0.1.0",
+  "type": "module",
   "scripts": {
-    "start": "react-scripts start",
+    "dev": "vite",
     "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "preview": "vite preview",
+    "test": "vitest",
+    "start": "react-scripts start"
   },
-  "eslintConfig": {
-    "extends": [
-      "react-app",
-      "react-app/jest"
-    ]
+  "dependencies": {
+    "aws-amplify": "^6.0.0",
+    "pino": "^9.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.4.5",
+    "@testing-library/react": "^15.0.7",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "jsdom": "^24.1.0",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.11",
+    "vitest": "^1.6.0"
   },
   "browserslist": {
     "production": [

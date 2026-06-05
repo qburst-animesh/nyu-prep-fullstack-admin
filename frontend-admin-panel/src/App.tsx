@@ -2,18 +2,16 @@ import React from 'react';
 import { Authenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
 import { AppBar, Toolbar, Typography, Button, Container, Box } from '@mui/material';
-import CSVTable from './CSVTable'; // Ensure exact case sensitivity
+import CSVTable from './components/CSVTable';
 
-// Explicitly defining the sign-up fields to match your Cognito schema requirement
 const customFormFields = {
   signUp: {
-    // This tells Amplify to map the text box value specifically to the "emails" key
     email: {
       order: 1,
       isRequired: true,
       label: 'Email Address',
       placeholder: 'Enter your email',
-      name: 'email' // FIXED: Changed 'emails' to 'email' to match Cognito standards
+      name: 'email'
     },
     username: { order: 2 },
     password: { order: 3 },
@@ -21,10 +19,15 @@ const customFormFields = {
   }
 };
 
+interface AuthChildrenProps {
+  signOut?: () => void;
+  user?: Record<string, any>;
+}
+
 export default function App() {
   return (
     <Authenticator formFields={customFormFields}>
-      {({ signOut, user }) => (
+      {({ signOut, user }: AuthChildrenProps) => (
         <Box sx={{ bgcolor: '#f4f6f8', minHeight: '100vh' }}>
           <AppBar position="static" color="primary">
             <Toolbar>
