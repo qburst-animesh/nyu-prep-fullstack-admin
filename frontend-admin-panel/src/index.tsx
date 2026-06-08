@@ -5,21 +5,21 @@ import './index.css';
 import { Amplify } from 'aws-amplify';
 import { logger } from './utils/apiFetch';
 
-const userPoolId = process.env.REACT_APP_COGNITO_USER_POOL_ID;
-const userPoolClientId = process.env.REACT_APP_COGNITO_CLIENT_ID;
+const userPoolId = import.meta.env.VITE_COGNITO_USER_POOL_ID as string | undefined;
+const userPoolClientId = import.meta.env.VITE_COGNITO_CLIENT_ID as string | undefined;
 
-if (!userPoolId || !userPoolClientId) {
-  logger.error('CRITICAL: AWS Cognito environment infrastructure strings missing inside .env context configurations!');
-}
+const authEnabled = Boolean(userPoolId && userPoolClientId);
 
-Amplify.configure({
-  Auth: {
-    Cognito: {
+if (!authEnabled) {
+  logger.warn('AWS Cognito env vars missing — running without authentication (local dev).');
+} else {
+  Amplify.configure({
+    Auth: {
       userPoolId: userPoolId || '',
-      userPoolClientId: userPoolClientId || '',
+      userPoolWebClientId: userPoolClientId || '',
     }
-  }
-});
+  } as any);
+}
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -29,6 +29,6 @@ if (!rootElement) {
 const root = ReactDOM.createRoot(rootElement);
 root.render(
   <React.StrictMode>
-    <App />
+    <App authEnabled={authEnabled} />
   </React.StrictMode>
 );
