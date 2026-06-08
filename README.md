@@ -1,70 +1,164 @@
-# Getting Started with Create React App
+# NYU Prep Fullstack Admin
 
-This project was bootstrapped with [Create React App](
+This repository contains a small full-stack admin application for managing CSV file uploads. The system uses a React frontend for authentication and file management, and a FastAPI backend for metadata storage and S3 presigned URL workflows.
 
-## Available Scripts
+## Repository structure
 
-In the project directory, you can run:
+```text
+nyu-prep-fullstack-admin/
+├── backend-admin-panel/
+│   ├── app_fastapi/
+│   │   ├── database.py
+│   │   ├── main.py
+│   │   ├── models.py
+│   │   ├── s3_service.py
+│   │   └── schemas.py
+│   └── requirements.txt
+├── frontend-admin-panel/
+│   ├── public/
+│   ├── src/
+│   │   ├── components/
+│   │   ├── hooks/
+│   │   └── utils/
+│   ├── package.json
+│   └── vite.config.ts
+└── README.md
+```
 
-### `npm start`
+## Architecture overview
 
-Runs the app in the development mode.\
-Open [http://localhost:3000]
+### Frontend
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+The frontend lives in `frontend-admin-panel/`.
 
-### `npm test`
+It is responsible for:
+- authenticating users with AWS Cognito through Amplify
+- rendering the admin dashboard
+- requesting presigned upload URLs from the backend
+- uploading CSV files directly to S3
+- saving file metadata through backend APIs
+- listing and deleting uploaded file records
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+Important frontend files:
+- `frontend-admin-panel/src/index.tsx` - bootstraps React and configures Amplify Auth
+- `frontend-admin-panel/src/App.tsx` - authenticated app shell and dashboard layout
+- `frontend-admin-panel/src/components/CSVTable.tsx` - file table, upload button, delete action
+- `frontend-admin-panel/src/hooks/useCSVData.ts` - main file fetch/upload/delete workflow
+- `frontend-admin-panel/src/utils/apiFetch.ts` - authenticated fetch helper and logging
 
-### `npm run build`
+### Backend
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+The backend lives in `backend-admin-panel/`.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+It is responsible for:
+- exposing REST endpoints for file operations
+- generating S3 presigned upload and download URLs
+- persisting file metadata in PostgreSQL with SQLAlchemy
+- handling deletion from both S3 and the database
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+Important backend files:
+- `backend-admin-panel/app_fastapi/main.py` - FastAPI app, routes, and CORS setup
+- `backend-admin-panel/app_fastapi/database.py` - SQLAlchemy engine, session, and base model setup
+- `backend-admin-panel/app_fastapi/models.py` - database model for uploaded CSV records
+- `backend-admin-panel/app_fastapi/schemas.py` - Pydantic request and response schemas
+- `backend-admin-panel/app_fastapi/s3_service.py` - boto3 wrapper for S3 URL generation and deletion
 
-### `npm run eject`
+## Key technologies
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+### Frontend
+- React 18
+- TypeScript
+- Vite
+- Vitest
+- AWS Amplify
+- AWS Cognito
+- Pino logging
+- Material UI and MUI Data Grid components in the app code
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+### Backend
+- FastAPI
+- SQLAlchemy
+- Pydantic
+- boto3
+- PostgreSQL
+- Uvicorn
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+## Request flow
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+The main upload flow works like this:
 
-## Learn More
+1. The frontend requests `POST /api/v1/files/upload-url`.
+2. The backend generates a unique S3 key and returns a presigned upload URL.
+3. The frontend uploads the file directly to S3 using the returned URL.
+4. The frontend calls `POST /api/v1/files` to save metadata in PostgreSQL.
+5. The dashboard refreshes by calling `GET /api/v1/files`.
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+Deletion works through `DELETE /api/v1/files/{file_id}`, which removes the object from S3 and the metadata row from the database.
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+## Backend API
 
-### Code Splitting
+Current backend routes:
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+- `POST /api/v1/files/upload-url`
+- `POST /api/v1/files`
+- `GET /api/v1/files`
+- `GET /api/v1/files/{file_id}/download`
+- `DELETE /api/v1/files/{file_id}`
 
-### Analyzing the Bundle Size
+## Environment variables
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+### Frontend
 
-### Making a Progressive Web App
+The current frontend code reads these environment variables:
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+- `REACT_APP_API_BASE_URL` - backend base URL used by `authenticatedFetch`
+- `REACT_APP_COGNITO_USER_POOL_ID` - Cognito user pool ID
+- `REACT_APP_COGNITO_CLIENT_ID` - Cognito app client ID
+- `REACT_APP_LOG_LEVEL` - optional browser log level, defaults to `info`
 
-### Advanced Configuration
+> Note: the frontend uses Vite as its build tool, but the code has not been updated to use Vite's `VITE_*` environment variable naming convention. The documented names above match the code as it exists today.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+### Backend
 
-### Deployment
+The backend expects these environment variables:
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
+- `DATABASE_URL` - SQLAlchemy database connection string
+- `CORS_ORIGINS` - comma-separated allowed frontend origins, defaults to `http://localhost:3000`
+- `BUCKET_NAME` - S3 bucket name, defaults to `local-test-csv-bucket`
+- `AWS_DEFAULT_REGION` - AWS region, defaults to `us-east-1`
+- `AWS_ACCESS_KEY_ID` - AWS access key
+- `AWS_SECRET_ACCESS_KEY` - AWS secret key
 
-### `npm run build` fails to minify
+## Local development
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+### 1. Backend setup
+
+```bash
+cd backend-admin-panel
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app_fastapi.main:app --reload
+```
+
+By default, the FastAPI app creates tables on startup using the configured `DATABASE_URL`.
+
+When running the frontend with `npm run dev`, Vite defaults to `http://localhost:5173`. If this port is unavailable, Vite will select an alternative port, so adjust `CORS_ORIGINS` accordingly for local development.
+
+### 2. Frontend setup
+
+```bash
+cd frontend-admin-panel
+npm install
+npm run dev
+```
+
+## Frontend scripts
+
+From `frontend-admin-panel/`:
+
+- `npm run dev` - start the Vite dev server
+- `npm run test` - run Vitest
+- `npm run lint` - run ESLint
+- `npm run build` - production build script currently configured in `package.json`
+
