@@ -7,29 +7,35 @@ export interface CSVFileRecord {
   s3_key: string;
   file_size_bytes: number;
   mime_type: string;
+  status?: string;
+  verified?: boolean;
   created_at: string;
   updated_at: string;
+  delete_requested_at?: string | null;
+  delete_attempts?: number | null;
+  delete_last_error?: string | null;
+  delete_completed_at?: string | null;
 }
 
 export function useCSVData() {
   const [fileList, setFileList] = useState<CSVFileRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [uploading, setUploading] = useState<boolean>(false);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const fetchDatabaseRecords = useCallback(async () => {
     setLoading(true);
     setErrorMessage(null);
-    logger.info('Initiating database record fetch orchestration.');
+    logger.info('Fetching CSV file records');
     try {
       const response = await authenticatedFetch('/files');
-      if (!response.ok) throw new Error(`Server returned status operational fault: ${response.status}`);
+      if (!response.ok) throw new Error(`Backend returned ${response.status}`);
       const data: CSVFileRecord[] = await response.json();
       setFileList(data);
-      logger.info({ count: data.length }, 'Successfully synchronized local state ledger.');
     } catch (err: any) {
-      logger.error({ err }, 'Failed to pull infrastructure data index mapping models.');
-      setErrorMessage('Failed to load database records. Please try again.');
+      logger.error({ err }, 'Failed to fetch file records');
+      setErrorMessage('Failed to load database records.');
     } finally {
       setLoading(false);
     }
@@ -39,78 +45,122 @@ export function useCSVData() {
     if (!file) return;
     setUploading(true);
     setErrorMessage(null);
-    logger.info({ filename: file.name, size: file.size }, 'Commencing pre-signed file payload routing workflow.');
+
+    if (!file.name.toLowerCase().endsWith('.csv')) {
+      setErrorMessage('Only .csv files are allowed.');
+      setUploading(false);
+      return;
+    }
 
     try {
-      // Step A: Request S3 pointer allocation mapping slot
       const urlResponse = await authenticatedFetch('/files/upload-url', {
         method: 'POST',
-        body: JSON.stringify({
-          filename: file.name,
-          file_size_bytes: file.size,
-          mime_type: file.type || 'text/csv',
-        }),
+        body: JSON.stringify({ filename: file.name, file_size_bytes: file.size, mime_type: file.type || 'text/csv' }),
       });
 
-      if (!urlResponse.ok) throw new Error('Backend failed to allocate an S3 secure link asset.');
-      const { upload_url, s3_key } = await urlResponse.json();
+      let urlBody: any = null;
+      try { urlBody = await urlResponse.json(); } catch (e) { urlBody = null; }
+      if (!urlResponse.ok) {
+        const msg = (urlBody && (urlBody.detail?.message || urlBody.message)) || urlBody || `Backend returned ${urlResponse.status}`;
+        throw new Error(msg);
+      }
 
-      // Step B: Direct Binary Stream to AWS S3 Bucket
-      logger.info({ s3_key }, 'Streaming binary payload chunks directly to S3 endpoint.');
-      
-      // 1. Convert file to ArrayBuffer to drop auto-generated headers
-      const fileBinary = await file.arrayBuffer();
+      const { upload_url, s3_key } = urlBody;
 
-      // 2. Use the exact upload_url from the backend. 
-      // Do not rewrite the host domain, as it invalidates the AWS Signature security hash.
-      const s3PutResponse = await fetch(upload_url, {
-        method: 'PUT',
-        body: fileBinary,
-        headers: {},
-      });
-
-      if (!s3PutResponse.ok) throw new Error('AWS S3 pipeline rejected binary file ingestion streams.');
-
-      // Step C: Commit Metadata Record into Database Ledger
-      logger.info('Registering verified cloud allocation metadata to system database ledger.');
       const confirmResponse = await authenticatedFetch('/files', {
         method: 'POST',
-        body: JSON.stringify({
-          filename: file.name,
-          file_size_bytes: file.size,
-          mime_type: file.type || 'text/csv',
-          s3_key: s3_key,
-        }),
+        body: JSON.stringify({ filename: file.name, file_size_bytes: file.size, mime_type: file.type || 'text/csv', s3_key }),
       });
 
-      if (!confirmResponse.ok) throw new Error('Database tier denied application logging schema verification.');
+      if (!confirmResponse.ok) {
+        let b: any = null;
+        try { b = await confirmResponse.json(); } catch (e) { try { b = await confirmResponse.text(); } catch (e2) { b = null } }
+        throw new Error((b && (b.detail?.message || b.message)) || b || `DB returned ${confirmResponse.status}`);
+      }
+
+      const createdRecord = await confirmResponse.json();
       await fetchDatabaseRecords();
+
+      // Background upload with XHR so UI is non-blocking
+      (async () => {
+        const xhr = new XMLHttpRequest();
+        try {
+          xhr.open('PUT', upload_url);
+          try { xhr.setRequestHeader('Content-Type', file.type || 'text/csv'); } catch (e) { }
+          xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) setUploadProgress(Math.round((event.loaded / event.total) * 100));
+          };
+
+          xhr.onload = async () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              const patchResp = await authenticatedFetch(`/files/${createdRecord.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'uploaded' }) });
+              if (!patchResp.ok) setErrorMessage('Upload completed but verification failed.');
+            } else {
+              setErrorMessage('Upload failed.');
+              try { await authenticatedFetch(`/files/${createdRecord.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'failed' }) }); } catch (e) { }
+            }
+            setUploadProgress(0);
+            await fetchDatabaseRecords();
+          };
+
+          xhr.onerror = async () => {
+            setErrorMessage('Upload failed.');
+            try { await authenticatedFetch(`/files/${createdRecord.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'failed' }) }); } catch (e) { }
+            setUploadProgress(0);
+            await fetchDatabaseRecords();
+          };
+
+          xhr.send(file);
+        } catch (err) {
+          try { await authenticatedFetch(`/files/${createdRecord.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'failed' }) }); } catch (e) { }
+          setUploadProgress(0);
+          await fetchDatabaseRecords();
+        }
+      })();
+
     } catch (err: any) {
-      logger.error({ err }, 'Fatal failure during distributed file upload ingestion chain.');
-      setErrorMessage(err.message || 'An error occurred during file upload.');
+      logger.error({ err }, 'File upload failed');
+      setErrorMessage(err?.message || 'Upload error');
     } finally {
       setUploading(false);
     }
   };
 
-  const handleDeleteFile = async (idToDelete: number) => {
-    logger.warn({ idToDelete }, 'Requesting system resource teardown sequence.');
+  const handleDeleteFile = async (id: number, deleteS3 = false) => {
     try {
-      const response = await authenticatedFetch(`/files/${idToDelete}`, {
-        method: 'DELETE',
-      });
-      if (!response.ok) throw new Error('Distributed architecture cleanup command failed.');
-      setFileList((prev) => prev.filter((file) => file.id !== idToDelete));
-      logger.info({ idToDelete }, 'Successfully extracted resource across all boundary entities.');
-    } catch (err: any) {
-      logger.error({ err, idToDelete }, 'Resource evacuation failure execution routine broken.');
-      setErrorMessage('Could not remove file registration metadata context safely.');
+      const resp = await authenticatedFetch(`/files/${id}?delete_s3=${deleteS3}`, { method: 'DELETE' });
+      if (resp.status === 202) {
+        setFileList(prev => prev.map(f => f.id === id ? { ...f, status: 'deleting' } : f));
+        return;
+      }
+      if (resp.status === 404) {
+        setFileList(prev => prev.filter(f => f.id !== id));
+        return;
+      }
+      if (!resp.ok) throw new Error(await resp.text());
+      setFileList(prev => prev.filter(f => f.id !== id));
+    } catch (err) {
+      logger.error({ err, id }, 'Delete failed');
+      throw err;
     }
   };
 
-  useEffect(() => {
-    fetchDatabaseRecords();
-  }, [fetchDatabaseRecords]);
+  const retryDeleteFile = async (id: number) => {
+    const resp = await authenticatedFetch(`/files/${id}/retry-delete`, { method: 'POST' });
+    if (resp.status === 202) {
+      setFileList(prev => prev.map(f => f.id === id ? { ...f, status: 'deleting' } : f));
+      return;
+    }
+    if (!resp.ok) throw new Error(await resp.text());
+  };
 
-  return { fileList, loading, uploading, errorMessage, handleFileUpload, handleDeleteFile };
+  useEffect(() => { fetchDatabaseRecords(); }, [fetchDatabaseRecords]);
+
+  useEffect(() => {
+    if (!errorMessage) return;
+    const t = setTimeout(() => setErrorMessage(null), 5000);
+    return () => clearTimeout(t);
+  }, [errorMessage]);
+
+  return { fileList, loading, uploading, uploadProgress, errorMessage, handleFileUpload, handleDeleteFile, retryDeleteFile, refresh: fetchDatabaseRecords };
 }

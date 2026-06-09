@@ -40,3 +40,7 @@ __pycache__/
 __pycache__
 /back_up_folder
 .README.md
+frontend.pid
+backend.pid
+frontend.log
+backend.log  

@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CloudFormation template to deploy an S3-backed CSV processing Lambda.
+  This version maps triggers safely to an existing S3 bucket parameter.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Name of the existing S3 bucket used for CSV uploads.
+
+  LambdaS3CodeBucket:
+    Type: String
+    Description: S3 bucket that holds the Lambda deployment package (zip).
+
+  LambdaS3CodeKey:
+    Type: String
+    Description: S3 key for the Lambda zip file (object key).
+
+  BackendVerifyUrl:
+    Type: String
+    Description: Full URL of the backend verify endpoint (e.g. https://api.example.com/api/v1/files/verify).
+
+  BackendBaseUrl:
+    Type: String
+    Description: Base URL of the backend service (e.g. https://api.example.com) used by delete lambda callbacks.
+
+  VerifySecret:
+    Type: String
+    Description: Secret token the Lambda will include in the X-Verify-Token header when calling the backend.
+    NoEcho: true
+
+  LambdaFunctionName:
+    Type: String
+    Default: csv-processor-lambda
+
+  DeleteLambdaFunctionName:
+    Type: String
+    Default: csv-delete-lambda
+
+  LambdaRuntime:
+    Type: String
+    Default: python3.10
+
+  LambdaMemory:
+    Type: Number
+    Default: 1024
+
+  LambdaTimeout:
+    Type: Number
+    Default: 300
+
+  MaxRowsToValidate:
+    Type: Number
+    Default: 1000
+
+  LambdaS3CodeKey:
+    Type: String
+    Description: S3 key for the Lambda zip file (object key).
+
+  BackendVerifyUrl:
+    Type: String
+    Description: Full URL of the backend verify endpoint (e.g. https://api.example.com/api/v1/files/verify).
+
+  BackendBaseUrl:
+    Type: String
+    Description: Base URL of the backend service (e.g. https://api.example.com) used by delete lambda callbacks.
+
+  VerifySecret:
+    Type: String
+    Description: Secret token the Lambda will include in the X-Verify-Token header when calling the backend.
+    NoEcho: true
+
+  LambdaFunctionName:
+    Type: String
+    Default: csv-processor-lambda
+
+  DeleteLambdaFunctionName:
+    Type: String
+    Default: csv-delete-lambda
+
+  LambdaRuntime:
+    Type: String
+    Default: python3.10
+
+  LambdaMemory:
+    Type: Number
+    Default: 1024
+
+  LambdaTimeout:
+    Type: Number
+    Default: 300
+
+  MaxRowsToValidate:
+    Type: Number
+    Default: 1000
+
+  ValidateFullFile:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+
+Resources:
+  CsvBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:Put
+            Function: !GetAtt CsvProcessorFunction.Arn
+    DependsOn: LambdaInvokePermissionFromS3
+
+  CsvProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${LambdaFunctionName}-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  CsvDeleteRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${DeleteLambdaFunctionName}-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  CsvProcessorS3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${LambdaFunctionName}-s3-policy'
+      Roles:
+        - !Ref CsvProcessorRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource:
+              - !Sub 'arn:aws:s3:::${BucketName}'
+              - !Sub 'arn:aws:s3:::${BucketName}/*'
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: '*'
+
+  CsvDeleteS3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${DeleteLambdaFunctionName}-s3-policy'
+      Roles:
+        - !Ref CsvDeleteRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:DeleteObject
+              - s3:GetObject
+            Resource:
+              - !Sub 'arn:aws:s3:::${BucketName}/*'
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: '*'
+
+  CsvProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Handler: s3_processor_lambda.lambda_handler
+      Runtime: !Ref LambdaRuntime
+      Role: !GetAtt CsvProcessorRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaS3CodeBucket
+        S3Key: !Ref LambdaS3CodeKey
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemory
+      Environment:
+        Variables:
+          BACKEND_VERIFY_URL: !Ref BackendVerifyUrl
+          VERIFY_SECRET: !Ref VerifySecret
+          MAX_ROWS_TO_VALIDATE: !Ref MaxRowsToValidate
+          VALIDATE_FULL_FILE: !Ref ValidateFullFile
+          FAILED_PREFIX: failed/
+          COPY_ON_FAILURE: 'true'
+          S3_READ_RETRIES: '3'
+
+  CsvDeleteFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref DeleteLambdaFunctionName
+      Handler: s3_delete_lambda.lambda_handler
+      Runtime: !Ref LambdaRuntime
+      Role: !GetAtt CsvDeleteRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaS3CodeBucket
+        S3Key: !Ref LambdaS3CodeKey
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref BucketName
+          BACKEND_BASE_URL: !Ref BackendBaseUrl
+          VERIFY_SECRET: !Ref VerifySecret
+
+  LambdaInvokePermissionFromS3:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CsvProcessorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub 'arn:aws:s3:::${BucketName}'
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the deployed Lambda function
+    Value: !GetAtt CsvProcessorFunction.Arn
+
+  BucketName:
+    Description: Name of the S3 bucket
+    Value: !Ref BucketName
+
+  DeleteLambdaFunctionArn:
+    Description: ARN of the deployed Delete Lambda function
+    Value: !GetAtt CsvDeleteFunction.Arn
