@@ -67,6 +67,41 @@ export function useCSVData() {
 
       const { upload_url, s3_key } = urlBody;
 
+      // Upload first (keep progress updates via XHR), then create DB record on success.
+      const uploadPromise = new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        try {
+          xhr.open('PUT', upload_url);
+          try { xhr.setRequestHeader('Content-Type', file.type || 'text/csv'); } catch (e) { }
+          xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) setUploadProgress(Math.round((event.loaded / event.total) * 100));
+          };
+
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve();
+            } else {
+              reject(new Error('Upload failed'));
+            }
+          };
+
+          xhr.onerror = () => reject(new Error('Upload failed'));
+
+          xhr.send(file);
+        } catch (err) {
+          reject(err);
+        }
+      });
+
+      try {
+        await uploadPromise;
+      } catch (err) {
+        setErrorMessage('Upload failed.');
+        setUploadProgress(0);
+        return;
+      }
+
+      // Only create DB record after upload succeeds
       const confirmResponse = await authenticatedFetch('/files', {
         method: 'POST',
         body: JSON.stringify({ filename: file.name, file_size_bytes: file.size, mime_type: file.type || 'text/csv', s3_key }),
@@ -78,45 +113,9 @@ export function useCSVData() {
         throw new Error((b && (b.detail?.message || b.message)) || b || `DB returned ${confirmResponse.status}`);
       }
 
-      const createdRecord = await confirmResponse.json();
+      await confirmResponse.json();
       await fetchDatabaseRecords();
-
-      // Background upload with XHR so UI is non-blocking
-      (async () => {
-        const xhr = new XMLHttpRequest();
-        try {
-          xhr.open('PUT', upload_url);
-          try { xhr.setRequestHeader('Content-Type', file.type || 'text/csv'); } catch (e) { }
-          xhr.upload.onprogress = (event) => {
-            if (event.lengthComputable) setUploadProgress(Math.round((event.loaded / event.total) * 100));
-          };
-
-          xhr.onload = async () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
-              const patchResp = await authenticatedFetch(`/files/${createdRecord.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'uploaded' }) });
-              if (!patchResp.ok) setErrorMessage('Upload completed but verification failed.');
-            } else {
-              setErrorMessage('Upload failed.');
-              try { await authenticatedFetch(`/files/${createdRecord.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'failed' }) }); } catch (e) { }
-            }
-            setUploadProgress(0);
-            await fetchDatabaseRecords();
-          };
-
-          xhr.onerror = async () => {
-            setErrorMessage('Upload failed.');
-            try { await authenticatedFetch(`/files/${createdRecord.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'failed' }) }); } catch (e) { }
-            setUploadProgress(0);
-            await fetchDatabaseRecords();
-          };
-
-          xhr.send(file);
-        } catch (err) {
-          try { await authenticatedFetch(`/files/${createdRecord.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'failed' }) }); } catch (e) { }
-          setUploadProgress(0);
-          await fetchDatabaseRecords();
-        }
-      })();
+      setUploadProgress(0);
 
     } catch (err: any) {
       logger.error({ err }, 'File upload failed');
@@ -145,16 +144,18 @@ export function useCSVData() {
     }
   };
 
-  const retryDeleteFile = async (id: number) => {
-    const resp = await authenticatedFetch(`/files/${id}/retry-delete`, { method: 'POST' });
-    if (resp.status === 202) {
-      setFileList(prev => prev.map(f => f.id === id ? { ...f, status: 'deleting' } : f));
-      return;
-    }
-    if (!resp.ok) throw new Error(await resp.text());
-  };
-
   useEffect(() => { fetchDatabaseRecords(); }, [fetchDatabaseRecords]);
+
+  useEffect(() => {
+    const hasTransientRows = fileList.some((f) => f.status === 'pending' || f.status === 'deleting');
+    if (!hasTransientRows) return;
+
+    const timer = setInterval(() => {
+      fetchDatabaseRecords();
+    }, 5000);
+
+    return () => clearInterval(timer);
+  }, [fileList, fetchDatabaseRecords]);
 
   useEffect(() => {
     if (!errorMessage) return;
@@ -162,5 +163,5 @@ export function useCSVData() {
     return () => clearTimeout(t);
   }, [errorMessage]);
 
-  return { fileList, loading, uploading, uploadProgress, errorMessage, handleFileUpload, handleDeleteFile, retryDeleteFile, refresh: fetchDatabaseRecords };
+  return { fileList, loading, uploading, uploadProgress, errorMessage, handleFileUpload, handleDeleteFile, refresh: fetchDatabaseRecords };
 }

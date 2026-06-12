@@ -1,13 +1,13 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  CloudFormation template to deploy an S3-backed CSV processing Lambda.
-  This version dynamically supports both new buckets (created by the stack)
-  and pre-existing buckets via an automated Lambda-backed Custom Resource workaround.
+  Realtime CloudFormation template for CSV processor. This template requires
+  the core stack name (CoreStackName) to import resources created in the core
+  stack (bucket name, processor function ARN and processor role name).
 
 Parameters:
-  BucketName:
+  CoreStackName:
     Type: String
-    Description: Name of the S3 bucket used for CSV uploads (can be new or existing).
+    Description: The stack name of the core stack (used to import exported values).
 
   LambdaS3CodeBucket:
     Type: String
@@ -17,208 +17,44 @@ Parameters:
     Type: String
     Description: S3 key for the Lambda zip file (object key).
 
-  BackendVerifyUrl:
-    Type: String
-    Description: Full URL of the backend verify endpoint (e.g. https://api.example.com/api/v1/files/verify).
-
-  BackendBaseUrl:
-    Type: String
-    Description: Base URL of the backend service (e.g. https://api.example.com) used by delete lambda callbacks.
-
-  VerifySecret:
-    Type: String
-    Description: Secret token the Lambda will include in the X-Verify-Token header when calling the backend.
-    NoEcho: true
-
   LambdaFunctionName:
     Type: String
     Default: csv-processor-lambda
-
-  DeleteLambdaFunctionName:
-    Type: String
-    Default: csv-delete-lambda
 
   LambdaRuntime:
     Type: String
     Default: python3.12
 
-  LambdaMemory:
-    Type: Number
-    Default: 1024
-
-  LambdaTimeout:
-    Type: Number
-    Default: 300
-
-  MaxRowsToValidate:
-    Type: Number
-    Default: 1000
-
-  ValidateFullFile:
-    Type: String
-    Default: 'false'
-    AllowedValues: ['true', 'false']
-
   CognitoUserPoolId:
     Type: String
     Default: ''
-    Description: Cognito User Pool Id for the JWT Authorizer (e.g. us-east-1_XXXX)
 
   CognitoClientId:
     Type: String
     Default: ''
-    Description: Cognito App Client ID used as JWT audience
-
-  CreateBucket:
+  BackendBaseUrl:
     Type: String
-    Default: 'false'
-    AllowedValues: ['true', 'false']
-    Description: Select 'true' to create a new bucket; select 'false' if using an already existing bucket.
-
-  EnableRealtime:
-    Type: String
-    Default: 'false'
-    AllowedValues: ['true', 'false']
-    Description: Set to 'true' to create realtime infra (SQS, WebSocket, DynamoDB).
-
-Conditions:
-  CreateBucketCondition: !Equals [ !Ref CreateBucket, 'true' ]
-  UseExistingBucketCondition: !Equals [ !Ref CreateBucket, 'false' ]
-  EnableRealtimeCondition: !Equals [ !Ref EnableRealtime, 'true' ]
-  UseExistingBucketAndRealtimeCondition: !And [ !Equals [ !Ref CreateBucket, 'false' ], !Equals [ !Ref EnableRealtime, 'true' ] ]
+    Default: ''
+    Description: Base URL of the backend service (e.g. https://api.example.com) used by the HTTP integration.
 
 Resources:
-  # NATIVE SOLUTION: Used only if CreateBucket is true
-  CsvBucket:
-    Condition: CreateBucketCondition
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Ref BucketName
-      NotificationConfiguration: !If
-        - EnableRealtimeCondition
-        - QueueConfigurations:
-            - Event: s3:ObjectCreated:Put
-              Queue: !GetAtt CsvQueue.Arn
-        - !Ref 'AWS::NoValue'
-
-  CsvProcessorRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub '${LambdaFunctionName}-role'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-
-  CsvDeleteRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub '${DeleteLambdaFunctionName}-role'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-
-  CsvProcessorS3Policy:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyName: !Sub '${LambdaFunctionName}-s3-policy'
-      Roles:
-        - !Ref CsvProcessorRole
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Action:
-              - s3:GetObject
-              - s3:PutObject
-              - s3:ListBucket
-            Resource:
-              - !Sub 'arn:aws:s3:::${BucketName}'
-              - !Sub 'arn:aws:s3:::${BucketName}/*'
-          - Effect: Allow
-            Action:
-              - logs:CreateLogGroup
-              - logs:CreateLogStream
-              - logs:PutLogEvents
-            Resource: '*'
-          - !If
-            - EnableRealtimeCondition
-            - Effect: Allow
-              Action:
-                - execute-api:ManageConnections
-              Resource:
-                - !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CsvWebsocketApi}/*/POST/@connections/*'
-            - !Ref 'AWS::NoValue'
-          # If realtime enabled, add required SQS consumption permissions for the Lambda Event Source Mapping
-          - !If
-            - EnableRealtimeCondition
-            - Effect: Allow
-              Action:
-                - sqs:ReceiveMessage
-                - sqs:DeleteMessage
-                - sqs:GetQueueAttributes
-              Resource:
-                - !GetAtt CsvQueue.Arn
-            - !Ref 'AWS::NoValue'
-
-  CsvDeleteS3Policy:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyName: !Sub '${DeleteLambdaFunctionName}-s3-policy'
-      Roles:
-        - !Ref CsvDeleteRole
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Action:
-              - s3:DeleteObject
-              - s3:GetObject
-            Resource:
-              - !Sub 'arn:aws:s3:::${BucketName}/*'
-          - !If
-            - EnableRealtimeCondition
-            - Effect: Allow
-              Action:
-                - sqs:ReceiveMessage
-                - sqs:DeleteMessage
-                - sqs:GetQueueAttributes
-              Resource:
-                - !GetAtt CsvQueue.Arn
-            - !Ref 'AWS::NoValue'
-
+  # Dead-letter queue and main queue for realtime processing
   CsvDLQ:
-    Condition: EnableRealtimeCondition
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub '${LambdaFunctionName}-dlq'
-      VisibilityTimeout: !Ref LambdaTimeout
+      VisibilityTimeout: 300
 
   CsvQueue:
-    Condition: EnableRealtimeCondition
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub '${LambdaFunctionName}-queue'
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt CsvDLQ.Arn
         maxReceiveCount: 5
-      VisibilityTimeout: !Ref LambdaTimeout
+      VisibilityTimeout: 300
 
   CsvQueuePolicy:
-    Condition: EnableRealtimeCondition
     Type: AWS::SQS::QueuePolicy
     Properties:
       Queues:
@@ -234,23 +70,13 @@ Resources:
             Resource: !GetAtt CsvQueue.Arn
             Condition:
               ArnEquals:
-                aws:SourceArn: !Sub 'arn:aws:s3:::${BucketName}'
-
-  CsvProcessorEventSourceMapping:
-    Condition: EnableRealtimeCondition
-    Type: AWS::Lambda::EventSourceMapping
-    DependsOn:
-      - CsvProcessorS3Policy
-      - CsvQueue
-    Properties:
-      EventSourceArn: !GetAtt CsvQueue.Arn
-      FunctionName: !Ref CsvProcessorFunction
-      Enabled: true
-      BatchSize: 10
+                'aws:SourceArn': !Sub
+                  - 'arn:aws:s3:::${BucketName}'
+                  - BucketName: !ImportValue
+                      'Fn::Sub': '${CoreStackName}-BucketName'
 
   # HTTP API + Cognito JWT Authorizer
   CsvHttpApi:
-    Condition: EnableRealtimeCondition
     Type: AWS::ApiGatewayV2::Api
     Properties:
       Name: !Sub '${LambdaFunctionName}-http-api'
@@ -262,7 +88,6 @@ Resources:
         AllowHeaders: ['Authorization', 'Content-Type']
 
   CsvHttpApiAuthorizer:
-    Condition: EnableRealtimeCondition
     Type: AWS::ApiGatewayV2::Authorizer
     Properties:
       ApiId: !Ref CsvHttpApi
@@ -276,7 +101,6 @@ Resources:
           - !Ref CognitoClientId
 
   CsvHttpApiIntegration:
-    Condition: EnableRealtimeCondition
     Type: AWS::ApiGatewayV2::Integration
     Properties:
       ApiId: !Ref CsvHttpApi
@@ -286,7 +110,6 @@ Resources:
       PayloadFormatVersion: '1.0'
 
   CsvHttpApiRoute:
-    Condition: EnableRealtimeCondition
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref CsvHttpApi
@@ -296,7 +119,6 @@ Resources:
       Target: !Join ['', ['integrations/', !Ref CsvHttpApiIntegration]]
 
   CsvHttpApiStage:
-    Condition: EnableRealtimeCondition
     Type: AWS::ApiGatewayV2::Stage
     Properties:
       ApiId: !Ref CsvHttpApi
@@ -305,7 +127,6 @@ Resources:
 
   # WebSocket API and connection management
   CsvWebsocketConnectionsTable:
-    Condition: EnableRealtimeCondition
     Type: AWS::DynamoDB::Table
     Properties:
       TableName: !Sub '${LambdaFunctionName}-ws-connections'
@@ -318,10 +139,8 @@ Resources:
       BillingMode: PAY_PER_REQUEST
 
   WebsocketLambdaRole:
-    Condition: EnableRealtimeCondition
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub '${LambdaFunctionName}-ws-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -333,7 +152,6 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 
   WebsocketDDBPolicy:
-    Condition: EnableRealtimeCondition
     Type: AWS::IAM::Policy
     Properties:
       PolicyName: !Sub '${LambdaFunctionName}-ws-ddb-policy'
@@ -350,7 +168,6 @@ Resources:
             Resource: !GetAtt CsvWebsocketConnectionsTable.Arn
 
   CsvWebsocketConnectFunction:
-    Condition: EnableRealtimeCondition
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub '${LambdaFunctionName}-ws-connect'
@@ -367,7 +184,6 @@ Resources:
           CONNECTIONS_TABLE: !Ref CsvWebsocketConnectionsTable
 
   CsvWebsocketDisconnectFunction:
-    Condition: EnableRealtimeCondition
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub '${LambdaFunctionName}-ws-disconnect'
@@ -384,7 +200,6 @@ Resources:
           CONNECTIONS_TABLE: !Ref CsvWebsocketConnectionsTable
 
   CsvWebsocketApi:
-    Condition: EnableRealtimeCondition
     Type: AWS::ApiGatewayV2::Api
     Properties:
       Name: !Sub '${LambdaFunctionName}-ws-api'
@@ -392,7 +207,6 @@ Resources:
       RouteSelectionExpression: '$request.body.action'
 
   CsvWebsocketConnectIntegration:
-    Condition: EnableRealtimeCondition
     Type: AWS::ApiGatewayV2::Integration
     Properties:
       ApiId: !Ref CsvWebsocketApi
@@ -401,7 +215,6 @@ Resources:
       PayloadFormatVersion: '1.0'
 
   CsvWebsocketDisconnectIntegration:
-    Condition: EnableRealtimeCondition
     Type: AWS::ApiGatewayV2::Integration
     Properties:
       ApiId: !Ref CsvWebsocketApi
@@ -410,7 +223,6 @@ Resources:
       PayloadFormatVersion: '1.0'
 
   CsvWebsocketConnectRoute:
-    Condition: EnableRealtimeCondition
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref CsvWebsocketApi
@@ -418,7 +230,6 @@ Resources:
       Target: !Join ['', ['integrations/', !Ref CsvWebsocketConnectIntegration]]
 
   CsvWebsocketDisconnectRoute:
-    Condition: EnableRealtimeCondition
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref CsvWebsocketApi
@@ -426,7 +237,6 @@ Resources:
       Target: !Join ['', ['integrations/', !Ref CsvWebsocketDisconnectIntegration]]
 
   CsvWebsocketStage:
-    Condition: EnableRealtimeCondition
     Type: AWS::ApiGatewayV2::Stage
     Properties:
       ApiId: !Ref CsvWebsocketApi
@@ -434,7 +244,6 @@ Resources:
       StageName: ws
 
   PermissionForApiToInvokeConnectLambda:
-    Condition: EnableRealtimeCondition
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !GetAtt CsvWebsocketConnectFunction.Arn
@@ -443,7 +252,6 @@ Resources:
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CsvWebsocketApi}/*/$connect'
 
   PermissionForApiToInvokeDisconnectLambda:
-    Condition: EnableRealtimeCondition
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !GetAtt CsvWebsocketDisconnectFunction.Arn
@@ -451,52 +259,44 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CsvWebsocketApi}/*/$disconnect'
 
-  CsvProcessorFunction:
-    Type: AWS::Lambda::Function
+  # Attach realtime-specific permissions to the processor role exported by core stack
+  CsvProcessorRealtimePolicy:
+    Type: AWS::IAM::Policy
     Properties:
-      FunctionName: !Ref LambdaFunctionName
-      Handler: s3_processor_lambda.lambda_handler
-      Runtime: !Ref LambdaRuntime
-      Role: !GetAtt CsvProcessorRole.Arn
-      Code:
-        S3Bucket: !Ref LambdaS3CodeBucket
-        S3Key: !Ref LambdaS3CodeKey
-      Timeout: !Ref LambdaTimeout
-      MemorySize: !Ref LambdaMemory
-      Environment:
-        Variables:
-          BACKEND_VERIFY_URL: !Ref BackendVerifyUrl
-          VERIFY_SECRET: !Ref VerifySecret
-          MAX_ROWS_TO_VALIDATE: !Ref MaxRowsToValidate
-          VALIDATE_FULL_FILE: !Ref ValidateFullFile
-          FAILED_PREFIX: failed/
-          COPY_ON_FAILURE: 'true'
-          S3_READ_RETRIES: '3'
+      PolicyName: !Sub '${LambdaFunctionName}-realtime-extras'
+      Roles:
+        - !ImportValue
+            'Fn::Sub': '${CoreStackName}-ProcessorRoleName'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+            Resource:
+              - !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CsvWebsocketApi}/*/POST/@connections/*'
+          - Effect: Allow
+            Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+            Resource:
+              - !GetAtt CsvQueue.Arn
 
-  CsvDeleteFunction:
-    Type: AWS::Lambda::Function
+  # Event Source Mapping for SQS -> Processor function (function ARN imported from core stack)
+  CsvProcessorEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
     Properties:
-      FunctionName: !Ref DeleteLambdaFunctionName
-      Handler: s3_delete_lambda.lambda_handler
-      Runtime: !Ref LambdaRuntime
-      Role: !GetAtt CsvDeleteRole.Arn
-      Code:
-        S3Bucket: !Ref LambdaS3CodeBucket
-        S3Key: !Ref LambdaS3CodeKey
-      Timeout: 60
-      MemorySize: 256
-      Environment:
-        Variables:
-          BUCKET_NAME: !Ref BucketName
-          BACKEND_BASE_URL: !Ref BackendBaseUrl
-          VERIFY_SECRET: !Ref VerifySecret
+      EventSourceArn: !GetAtt CsvQueue.Arn
+      FunctionName: !ImportValue
+        'Fn::Sub': '${CoreStackName}-ProcessorFunctionArn'
+      Enabled: true
+      BatchSize: 10
 
-  # WORKAROUND SOLUTION FOR EXISTING BUCKETS: Inline Custom Resource Lambda Function
+  # Custom Resource Lambda used to inject S3 notification configuration into existing buckets
   CustomResourceLambdaRole:
     Type: AWS::IAM::Role
-    Condition: UseExistingBucketAndRealtimeCondition
     Properties:
-      RoleName: !Sub '${LambdaFunctionName}-custom-resource-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -515,18 +315,17 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:GetBucketNotification
-                  - s3:PutBucketNotificationConfiguration
+                  - s3:PutBucketNotification
                   - s3:CreateBucket
                 Resource:
-                  - !Sub 'arn:aws:s3:::${BucketName}'
+                  - '*'
 
   CsvNotificationCustomResourceFunction:
     Type: AWS::Lambda::Function
-    Condition: UseExistingBucketAndRealtimeCondition
     Properties:
       FunctionName: !Sub '${LambdaFunctionName}-notification-injector'
       Handler: index.lambda_handler
-      Runtime: python3.12
+      Runtime: python3.11
       Role: !GetAtt CustomResourceLambdaRole.Arn
       Timeout: 60
       Code:
@@ -549,33 +348,28 @@ Resources:
               
               try:
                   if request_type in ['Create', 'Update']:
-                      # Safely read existing configurations to avoid destroying other decoupled integrations
-                              try:
-                                config = s3.get_bucket_notification_configuration(Bucket=bucket_name)
-                                config.pop('ResponseMetadata', None)
-                              except Exception as e:
-                                # If the bucket does not exist, attempt to create it so the stack can proceed.
-                                try:
-                                  from botocore.exceptions import ClientError
-                                  code = None
-                                  if isinstance(e, ClientError):
-                                    code = e.response.get('Error', {}).get('Code')
-                                  if code == 'NoSuchBucket':
-                                    print(f"Bucket {bucket_name} missing; attempting to create it.")
-                                    s3.create_bucket(Bucket=bucket_name)
-                                    config = {}
-                                    print(f"Created missing bucket: {bucket_name}")
-                                  else:
-                                    print("No configuration metadata found or error reading, instantiating blank structure.")
-                                    config = {}
-                                except Exception as e2:
-                                  print(f"Failed while handling missing bucket: {e2}")
-                                  # Re-raise to be handled by outer exception logic
-                                  raise
+                      try:
+                        config = s3.get_bucket_notification_configuration(Bucket=bucket_name)
+                        config.pop('ResponseMetadata', None)
+                      except Exception as e:
+                        try:
+                          from botocore.exceptions import ClientError
+                          code = None
+                          if isinstance(e, ClientError):
+                            code = e.response.get('Error', {}).get('Code')
+                          if code == 'NoSuchBucket':
+                            print(f"Bucket {bucket_name} missing; attempting to create it.")
+                            s3.create_bucket(Bucket=bucket_name)
+                            config = {}
+                            print(f"Created missing bucket: {bucket_name}")
+                          else:
+                            print("No configuration metadata found or error reading, instantiating blank structure.")
+                            config = {}
+                        except Exception as e2:
+                          print(f"Failed while handling missing bucket: {e2}")
+                          raise
                       
                       queue_configs = config.get('QueueConfigurations', [])
-                      
-                      # Enforce idempotence to verify we don't pollute the block with identical targets
                       already_configured = False
                       for item in queue_configs:
                           if item.get('QueueArn') == queue_arn and 's3:ObjectCreated:Put' in item.get('Events', []):
@@ -590,18 +384,15 @@ Resources:
                           })
                           config['QueueConfigurations'] = queue_configs
                           s3.put_bucket_notification_configuration(Bucket=bucket_name, NotificationConfiguration=config)
-                          print(f"Successfully configured notifications on pre-existing bucket: {bucket_name}")
-                          
+                          print(f"Successfully configured notifications on bucket: {bucket_name}")
+                  
                   elif request_type == 'Delete':
                       try:
                           config = s3.get_bucket_notification_configuration(Bucket=bucket_name)
                           config.pop('ResponseMetadata', None)
                           queue_configs = config.get('QueueConfigurations', [])
-                          
-                          # Filter and clean up only our target configuration
                           scrubbed_configs = [item for item in queue_configs if item.get('QueueArn') != queue_arn]
                           config['QueueConfigurations'] = scrubbed_configs
-                          
                           s3.put_bucket_notification_configuration(Bucket=bucket_name, NotificationConfiguration=config)
                           print(f"Successfully scrubbed target configuration from bucket: {bucket_name}")
                       except Exception as e:
@@ -624,7 +415,6 @@ Resources:
                   "LogicalResourceId": event['LogicalResourceId'],
                   "Data": response_data
               }).encode('utf-8')
-              
               request = urllib.request.Request(
                   event['ResponseURL'],
                   data=payload,
@@ -637,35 +427,20 @@ Resources:
               except Exception as error:
                   print(f"Failed pushing response block to CloudFormation callback endpoint: {error}")
 
-  # The Execution Node for the Custom Resource Rule
   CsvExistingBucketNotificationTrigger:
     Type: Custom::S3NotificationTrigger
-    Condition: UseExistingBucketAndRealtimeCondition
-    DependsOn: CsvQueuePolicy
     Properties:
       ServiceToken: !GetAtt CsvNotificationCustomResourceFunction.Arn
-      BucketName: !Ref BucketName
+      BucketName:
+        !ImportValue
+          'Fn::Sub': '${CoreStackName}-BucketName'
       QueueArn: !GetAtt CsvQueue.Arn
 
 Outputs:
-  LambdaFunctionArn:
-    Description: ARN of the deployed Lambda function
-    Value: !GetAtt CsvProcessorFunction.Arn
-
-  ApiGatewayHttpApiId:
-    Condition: EnableRealtimeCondition
-    Description: Id of the created HTTP API
-    Value: !Ref CsvHttpApi
-
   ApiGatewayEndpoint:
-    Condition: EnableRealtimeCondition
     Description: HTTP API endpoint
     Value: !GetAtt CsvHttpApi.ApiEndpoint
 
-  BucketName:
-    Description: Name of the S3 bucket
-    Value: !Ref BucketName
-
-  DeleteLambdaFunctionArn:
-    Description: ARN of the deployed Delete Lambda function
-    Value: !GetAtt CsvDeleteFunction.Arn
+  WebsocketApiId:
+    Description: Websocket API id
+    Value: !Ref CsvWebsocketApi

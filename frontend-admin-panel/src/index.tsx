@@ -15,10 +15,12 @@ if (!authEnabled) {
 } else {
   Amplify.configure({
     Auth: {
-      userPoolId: userPoolId || '',
-      userPoolWebClientId: userPoolClientId || '',
+      Cognito: {
+        userPoolId: userPoolId || '',
+        userPoolClientId: userPoolClientId || ''
+      }
     }
-  } as any);
+  });
 }
 
 const rootElement = document.getElementById('root');

@@ -1,6 +1,11 @@
 import os
+import logging
 import boto3
 from botocore.exceptions import ClientError
+
+MAX_FILE_SIZE_BYTES = int(os.getenv('MAX_FILE_SIZE_BYTES', 100 * 1024 * 1024))  # 100MB default
+
+logger = logging.getLogger('csv_backend')
 
 class S3Service:
     def __init__(self):
@@ -42,7 +47,7 @@ class S3Service:
             print(f"Error generating presigned URL: {e}")
             return None
 
-    def generate_presigned_download_url(self, object_name: str, expiration=3600, filename: str = None) -> str:
+    def generate_presigned_download_url(self, object_name: str, expiration=3600, filename: str = None, bucket_name: str = None) -> str:
         """Generates a secure link for users to fetch/download files.
 
         If `filename` is provided, the presigned URL will request S3 to
@@ -50,7 +55,9 @@ class S3Service:
         friendly filename.
         """
         try:
-            params = {'Bucket': self.bucket_name, 'Key': object_name}
+            # Allow overriding the target bucket when needed (for summary artifacts)
+            target_bucket = bucket_name or self.bucket_name
+            params = {'Bucket': target_bucket, 'Key': object_name}
             if filename:
                 # Ask S3 to include a Content-Disposition header on the response
                 params['ResponseContentDisposition'] = f'attachment; filename="{filename}"'
@@ -64,24 +71,20 @@ class S3Service:
             print(f"Error generating download URL: {e}")
             return None
 
-    def delete_s3_object(self, object_name: str) -> bool:
+    def delete_s3_object(self, object_name: str, bucket_name: str = None) -> bool:
         """Removes the file content from AWS storage assets"""
         try:
-            self.s3_client.delete_object(Bucket=self.bucket_name, Key=object_name)
+            target_bucket = bucket_name or self.bucket_name
+            self.s3_client.delete_object(Bucket=target_bucket, Key=object_name)
             return True
         except ClientError:
-            # Log the failure for diagnostics and return False so callers
-            # can decide whether to proceed (e.g. avoid deleting DB records)
-            try:
-                import traceback
-                traceback.print_exc()
-            except Exception:
-                pass
+            logger.exception('Failed to delete S3 object: %s from bucket: %s', object_name, bucket_name or self.bucket_name)
             return False
 
-    def head_object(self, object_name: str):
+    def head_object(self, object_name: str, bucket_name: str = None):
         """Retrieve metadata for an object (size, ETag, etc.) or None if missing."""
         try:
-            return self.s3_client.head_object(Bucket=self.bucket_name, Key=object_name)
+            target_bucket = bucket_name or self.bucket_name
+            return self.s3_client.head_object(Bucket=target_bucket, Key=object_name)
         except ClientError:
             return None

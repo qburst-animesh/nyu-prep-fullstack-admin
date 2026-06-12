@@ -10,7 +10,7 @@ import type { CSVFileRecord } from '../hooks/useCSVData';
 import { authenticatedFetch } from '../utils/apiFetch';
 
 function CSVTable() {
-  const { fileList, loading, uploading, uploadProgress, errorMessage, handleFileUpload, handleDeleteFile, retryDeleteFile, refresh } = useCSVData();
+  const { fileList, loading, uploading, uploadProgress, errorMessage, handleFileUpload, handleDeleteFile, refresh } = useCSVData();
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; filename: string } | null>(null);
@@ -132,48 +132,18 @@ function CSVTable() {
           <IconButton color="primary" onClick={async (e: React.MouseEvent<HTMLButtonElement>) => {
             (e.currentTarget as HTMLElement).blur();
             try {
-              const apiBase = (import.meta.env.VITE_API_BASE_URL as string) || 'http://localhost:8000/api/v1';
-              const base = apiBase.replace(/\/$/, '');
-              const streamUrl = `${base}/files/${params.row.id}/download-stream`;
-
-              // Quick HEAD probe to see if backend can stream the object.
-              let okToStream = false;
-              try {
-                const head = await fetch(streamUrl, { method: 'HEAD' });
-                okToStream = head.ok;
-              } catch (err) {
-                okToStream = false;
-              }
-
-              if (okToStream) {
-                const a = document.createElement('a');
-                a.href = streamUrl;
-                a.target = '_blank';
-                a.rel = 'noopener noreferrer';
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                return;
-              }
-
-              // Fallback: request presigned download URL from backend and open it.
-              try {
-                const resp = await authenticatedFetch(`/files/${params.row.id}/download`);
-                if (!resp.ok) throw new Error('Could not get download link');
-                const { download_url } = await resp.json();
-                const a2 = document.createElement('a');
-                a2.href = download_url;
-                a2.target = '_blank';
-                a2.rel = 'noopener noreferrer';
-                a2.download = params.row.filename;
-                document.body.appendChild(a2);
-                a2.click();
-                a2.remove();
-                return;
-              } catch (err) {
-                console.error('Fallback download failed', err);
-                throw err;
-              }
+              // Request presigned download URL from backend
+              const resp = await authenticatedFetch(`/files/${params.row.id}/download`);
+              if (!resp.ok) throw new Error('Could not get download link');
+              const { download_url } = await resp.json();
+              const a = document.createElement('a');
+              a.href = download_url;
+              a.target = '_blank';
+              a.rel = 'noopener noreferrer';
+              a.download = params.row.filename;
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
             } catch (err) {
               console.error('Download failed', err);
             }
@@ -183,11 +153,6 @@ function CSVTable() {
           <IconButton color="error" onClick={(e: React.MouseEvent<HTMLButtonElement>) => { (e.currentTarget as HTMLElement).blur(); setDeleteTarget({ id: params.row.id, filename: params.row.filename }); setDeleteDialogOpen(true); }}>
             <DeleteIcon />
           </IconButton>
-          {params.row.status === 'delete_failed' && (
-            <Button variant="outlined" size="small" onClick={() => { (document.activeElement as HTMLElement)?.blur(); handleRetryDelete(params.row.id); }} sx={{ ml: 1 }}>
-              Retry Delete
-            </Button>
-          )}
         </>
       )
     }
@@ -196,25 +161,14 @@ function CSVTable() {
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     try {
-      const resp = await authenticatedFetch(`/files/${deleteTarget.id}?delete_s3=${deleteFromS3}`, { method: 'DELETE' });
-      if (!resp.ok) throw new Error('Delete failed');
+      await handleDeleteFile(deleteTarget.id, deleteFromS3);
       setDeleteDialogOpen(false);
       setDeleteTarget(null);
       setDeleteFromS3(false);
-      await refresh();
     } catch (err) {
       console.error('Delete failed', err);
     }
   };
-
-  const handleRetryDelete = async (id: number) => {
-    try {
-      await retryDeleteFile(id);
-      await refresh();
-    } catch (err) {
-      console.error('retry delete failed', err);
-    }
-  }
 
   const openSummary = async (row: CSVFileRecord) => {
     setSummaryTarget({ id: row.id, filename: row.filename });
@@ -238,6 +192,43 @@ function CSVTable() {
         setSummaryData(json);
         setSummaryLoading(false);
         return;
+      }
+
+      // Try WebSocket subscription first if a WS URL is configured
+      const wsUrl = (import.meta.env.VITE_WS_URL as string | undefined) || undefined;
+      if (wsUrl) {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const ws = new WebSocket(wsUrl);
+            const onMessage = async (evt: MessageEvent) => {
+              try {
+                const m = JSON.parse(evt.data);
+                if (m && m.type === 'summary_ready' && m.file_id === row.id && m.summary_url) {
+                  const r = await fetch(m.summary_url);
+                  if (!r.ok) throw new Error('Failed to download summary JSON');
+                  const json = await r.json();
+                  setSummaryData(json);
+                  ws.close();
+                  resolve();
+                }
+              } catch (e) {
+                // ignore parse errors and continue waiting
+              }
+            };
+            ws.onopen = () => {
+              try { ws.send(JSON.stringify({ action: 'subscribe', file_id: row.id })); } catch (e) { }
+            };
+            ws.onmessage = onMessage;
+            ws.onerror = (e) => { try { ws.close(); } catch (_) {} ; reject(new Error('WebSocket error')); };
+            // timeout after 30s
+            setTimeout(() => { try { ws.close(); } catch (_) {} ; reject(new Error('WebSocket timed out')); }, 30000);
+          });
+          setSummaryLoading(false);
+          return;
+        } catch (wsErr) {
+          // Fall back to HTTP trigger + polling if WS subscription failed
+          console.warn('WebSocket summary subscription failed, falling back to polling', wsErr);
+        }
       }
 
       // If summary does not exist, trigger parse and poll
@@ -371,7 +362,7 @@ function CSVTable() {
           rows={fileList}
           columns={tableColumns}
           loading={loading}
-          pageSizeOptions={[]}
+          pageSizeOptions={[5, 10, 25, 50]}
           initialState={{ pagination: { paginationModel: { page: 0, pageSize: 5 } } }}
         />
       </Box>

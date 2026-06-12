@@ -10,7 +10,6 @@ class CSVFileBase(BaseModel):
 
 class CSVFileCreate(CSVFileBase):
     s3_key: str
-    uploaded_by: Optional[str] = None
 
 
 class CSVFileStatusUpdate(BaseModel):
@@ -31,3 +30,14 @@ class CSVFileResponse(CSVFileBase):
 
     class Config:
         from_attributes = True
+
+
+class VerifyPayload(BaseModel):
+    s3_key: str
+    file_size_bytes: Optional[int] = None
+    bucket: Optional[str] = None
+
+
+class DeleteCompletePayload(BaseModel):
+    deleted: bool
+    message: Optional[str] = None

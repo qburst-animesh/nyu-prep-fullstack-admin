@@ -1,133 +1,59 @@
 import React, { useEffect, useState } from 'react';
-import { AppBar, Toolbar, Typography, Button, Container, Box, CircularProgress, Alert } from '@mui/material';
+import { Container, Box, Alert } from '@mui/material';
 import CSVTable from './components/CSVTable';
+import AuthGate from './components/AuthGate';
+import UserSessionBar from './components/UserSessionBar';
+import { AUTH_SESSION_EXPIRED_EVENT } from './utils/apiFetch';
 
-const customFormFields = {
-  signUp: {
-    email: {
-      order: 1,
-      isRequired: true,
-      label: 'Email Address',
-      placeholder: 'Enter your email',
-      name: 'email'
-    },
-    username: { order: 2 },
-    password: { order: 3 },
-    confirm_password: { order: 4 }
-  }
-};
 
-interface AuthChildrenProps {
-  signOut?: () => void;
-  user?: Record<string, any>;
+function AuthenticatedLayout({ signOut, user, sessionExpiredNotice, onSessionExpired, authEnabled }: { signOut?: () => void; user?: any; sessionExpiredNotice: string | null; onSessionExpired: (notice: string) => void; authEnabled: boolean }) {
+  useEffect(() => {
+    const onExpired = () => {
+      onSessionExpired('Your session expired. Please sign in again.');
+      try {
+        if (typeof signOut === 'function') signOut();
+      } catch (e) {
+        // ignore
+      }
+    };
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, onExpired as EventListener);
+    return () => window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, onExpired as EventListener);
+  }, [signOut, onSessionExpired]);
+
+  return (
+    <Box sx={{ bgcolor: '#f4f6f8', minHeight: '100vh' }}>
+      {sessionExpiredNotice && authEnabled && (
+        <Container maxWidth="lg" sx={{ pt: 2 }}>
+          <Alert severity="warning" onClose={() => onSessionExpired('')} sx={{ mb: 2 }}>
+            {sessionExpiredNotice}
+          </Alert>
+        </Container>
+      )}
+      {!authEnabled && (
+        <Container maxWidth="lg" sx={{ pt: 2 }}>
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            Authentication is disabled because Cognito environment variables are not configured.
+          </Alert>
+        </Container>
+      )}
+      <UserSessionBar
+        username={user?.username}
+        onLogout={signOut}
+        authEnabled={authEnabled}
+      />
+      <Container maxWidth="lg" sx={{ mt: 6 }}>
+        <CSVTable />
+      </Container>
+    </Box>
+  );
 }
 
 export default function App({ authEnabled = true }: { authEnabled?: boolean }) {
-  const [AuthenticatorComp, setAuthenticatorComp] = useState<any | null>(null);
-  const [authLoadError, setAuthLoadError] = useState<string | null>(null);
+  const [sessionExpiredNotice, setSessionExpiredNotice] = useState<string | null>(null);
 
-  useEffect(() => {
-    let mounted = true;
-    if (!authEnabled) return;
-
-    (async () => {
-      try {
-        const mod = await import('@aws-amplify/ui-react');
-        if (!mounted) return;
-        setAuthenticatorComp(() => mod.Authenticator);
-        // try load styles optionally (non-fatal)
-        try {
-          await import('@aws-amplify/ui-react/styles.css');
-        } catch (_) {}
-      } catch (err: any) {
-        if (!mounted) return;
-        setAuthLoadError(err?.message || String(err));
-        setAuthenticatorComp(null);
-      }
-    })();
-
-    return () => {
-      mounted = false;
-    };
-  }, [authEnabled]);
-
-  if (!authEnabled) {
-    // Render a simple unauthenticated layout for local development
-    return (
-      <Box sx={{ bgcolor: '#f4f6f8', minHeight: '100vh' }}>
-        <AppBar position="static" color="primary">
-          <Toolbar>
-            <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 'bold' }}>
-              Admin Panel Dashboard (Local)
-            </Typography>
-            <Typography variant="body1" sx={{ mr: 3 }}>
-              User: <strong>local-dev</strong>
-            </Typography>
-          </Toolbar>
-        </AppBar>
-        <Container maxWidth="lg" sx={{ mt: 6 }}>
-          <CSVTable />
-        </Container>
-      </Box>
-    );
-  }
-
-  if (authLoadError) {
-    // If the auth UI package failed to load, show a warning and fall back
-    return (
-      <Box sx={{ bgcolor: '#f4f6f8', minHeight: '100vh' }}>
-        <AppBar position="static" color="primary">
-          <Toolbar>
-            <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 'bold' }}>
-              Admin Panel Dashboard
-            </Typography>
-            <Typography variant="body1" sx={{ mr: 3 }}>
-              User: <strong>auth-unavailable</strong>
-            </Typography>
-          </Toolbar>
-        </AppBar>
-        <Container maxWidth="lg" sx={{ mt: 6 }}>
-          <Alert severity="warning" sx={{ mb: 2 }}>
-            Authentication UI failed to load; running without hosted sign-in. ({authLoadError})
-          </Alert>
-          <CSVTable />
-        </Container>
-      </Box>
-    );
-  }
-
-  if (!AuthenticatorComp) {
-    // Still loading the auth UI
-    return (
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '60vh' }}>
-        <CircularProgress />
-      </Box>
-    );
-  }
-
-  const Authenticator = AuthenticatorComp;
   return (
-    <Authenticator formFields={customFormFields}>
-      {({ signOut, user }: AuthChildrenProps) => (
-        <Box sx={{ bgcolor: '#f4f6f8', minHeight: '100vh' }}>
-          <AppBar position="static" color="primary">
-            <Toolbar>
-              <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 'bold' }}>
-                Admin Panel Dashboard
-              </Typography>
-              <Typography variant="body1" sx={{ mr: 3 }}>
-                User: <strong>{user?.username}</strong>
-              </Typography>
-              <Button variant="contained" color="error" onClick={signOut}>
-                Sign Out
-              </Button>
-            </Toolbar>
-          </AppBar>
-          <Container maxWidth="lg" sx={{ mt: 6 }}>
-            <CSVTable />
-          </Container>
-        </Box>
-      )}
-    </Authenticator>
+    <AuthGate authEnabled={authEnabled}>
+      {({ signOut, user }) => <AuthenticatedLayout signOut={signOut} user={user} sessionExpiredNotice={sessionExpiredNotice} onSessionExpired={setSessionExpiredNotice} authEnabled={authEnabled} />}
+    </AuthGate>
   );
 }

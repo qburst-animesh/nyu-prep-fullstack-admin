@@ -3,10 +3,12 @@ import json
 import boto3
 import urllib.request
 import urllib.error
+import posixpath as pp
 
 BUCKET = os.getenv('BUCKET_NAME')
 BACKEND_BASE = os.getenv('BACKEND_BASE_URL')  # e.g. https://api.example.com
 VERIFY_SECRET = os.getenv('VERIFY_SECRET')
+SUMMARY_BUCKET = os.getenv('SUMMARY_BUCKET_NAME')
 
 s3 = boto3.client('s3')
 
@@ -51,11 +53,13 @@ def lambda_handler(event, context):
     print('Event:', event)
     file_id = None
     s3_key = None
+    bucket_name = BUCKET
 
     # support both direct invocation payload and wrapped Records if provided
     if isinstance(event, dict):
         file_id = event.get('file_id')
         s3_key = event.get('s3_key')
+        bucket_name = event.get('bucket_name') or BUCKET
         # fallback: if Records provided, try to extract key
         if not s3_key and 'Records' in event and len(event['Records']) > 0:
             try:
@@ -69,9 +73,20 @@ def lambda_handler(event, context):
         return {'status': 'error', 'message': msg}
 
     try:
-        print(f'Deleting s3://{BUCKET}/{s3_key}')
-        resp = s3.delete_object(Bucket=BUCKET, Key=s3_key)
+        print(f'Deleting s3://{bucket_name}/{s3_key}')
+        resp = s3.delete_object(Bucket=bucket_name, Key=s3_key)
         print('S3 delete response:', resp)
+
+        # Attempt to delete the companion summary JSON in the dedicated summary bucket
+        if SUMMARY_BUCKET:
+            basename = pp.basename(s3_key)
+            summary_key = f"{basename}.summary.json"
+            try:
+                s3.delete_object(Bucket=SUMMARY_BUCKET, Key=summary_key)
+                print(f'Deleted summary object: s3://{SUMMARY_BUCKET}/{summary_key}')
+            except Exception as e:
+                print('Ignoring error deleting summary object:', e)
+
         _post_callback(file_id, True)
         return {'status': 'deleted', 's3_response': resp}
     except Exception as e:

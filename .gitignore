@@ -44,3 +44,6 @@ frontend.pid
 backend.pid
 frontend.log
 backend.log  
+tools/
+dist/
+public/

@@ -9,10 +9,12 @@ from typing import Optional
 
 import boto3
 from botocore.exceptions import ClientError
+import posixpath as pp
 
 # Environment configuration
 BACKEND_VERIFY_URL = os.getenv('BACKEND_VERIFY_URL')
 VERIFY_SECRET = os.getenv('VERIFY_SECRET')
+SUMMARY_BUCKET_NAME = os.getenv('SUMMARY_BUCKET_NAME')
 MAX_ROWS_TO_VALIDATE = int(os.getenv('MAX_ROWS_TO_VALIDATE', '1000'))
 VALIDATE_FULL_FILE = os.getenv('VALIDATE_FULL_FILE', 'false').lower() in ('1', 'true', 'yes')
 FAILED_PREFIX = os.getenv('FAILED_PREFIX', 'failed/')
@@ -21,6 +23,23 @@ S3_READ_RETRIES = int(os.getenv('S3_READ_RETRIES', '3'))
 SAMPLE_ROWS = int(os.getenv('SAMPLE_ROWS', '5'))
 
 s3_client = boto3.client('s3')
+
+
+def should_skip_key(key: str) -> bool:
+    # Prevent recursive processing of generated artifacts and failed copies.
+    return key.endswith('.summary.json') or key.startswith(FAILED_PREFIX)
+
+
+def summary_key_for_csv(key: str) -> str:
+    """Return the summary JSON key: just the CSV filename with .summary.json extension.
+    This is stored in the dedicated SUMMARY_BUCKET_NAME.
+
+    Examples:
+      - "uploads/2026-06-10/file.csv" -> "file.csv.summary.json"
+      - "file.csv" -> "file.csv.summary.json"
+    """
+    basename = pp.basename(key)
+    return f"{basename}.summary.json"
 
 
 def derive_backend_base(verify_url: Optional[str]) -> str:
@@ -43,9 +62,11 @@ def derive_backend_base(verify_url: Optional[str]) -> str:
 BACKEND_BASE_URL = os.getenv('BACKEND_BASE_URL') or derive_backend_base(BACKEND_VERIFY_URL)
 
 
-def http_post_json(url: str, data: dict, headers: Optional[dict] = None, timeout: int = 10):
+def http_post_json(url: str, data: dict, headers: Optional[dict] = None, timeout: int = 10, method: str = 'POST'):
     body = json.dumps(data).encode('utf-8')
-    req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json', **(headers or {})})
+    req_headers = {'Content-Type': 'application/json', **(headers or {})}
+    # urllib.request.Request supports a 'method' kwarg on recent Python versions
+    req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         resp_body = resp.read().decode('utf-8')
         try:
@@ -54,13 +75,34 @@ def http_post_json(url: str, data: dict, headers: Optional[dict] = None, timeout
             return resp.getcode(), resp_body
 
 
-def call_backend_verify(s3_key: str):
-    if not BACKEND_VERIFY_URL or not VERIFY_SECRET:
-        print('BACKEND_VERIFY_URL or VERIFY_SECRET not set; skipping backend verify call')
+def call_backend_verify(s3_key: str, file_size_bytes: int | None = None, bucket: str | None = None):
+    """Call backend verify endpoint with helpful metadata to aid matching.
+
+    Sends `s3_key` plus optional `file_size_bytes` and `bucket` so the
+    backend can robustly match existing DB records when keys differ.
+    """
+    # Determine the verify URL. Support either a full verify URL or a base URL.
+    verify_url = None
+    if BACKEND_VERIFY_URL:
+        if '/api/v1/files' in BACKEND_VERIFY_URL:
+            verify_url = BACKEND_VERIFY_URL
+        else:
+            verify_url = BACKEND_VERIFY_URL.rstrip('/') + '/api/v1/files/verify'
+    elif BACKEND_BASE_URL:
+        verify_url = BACKEND_BASE_URL.rstrip('/') + '/api/v1/files/verify'
+
+    if not verify_url or not VERIFY_SECRET:
+        print('Backend verify URL or VERIFY_SECRET not set; skipping backend verify call', 'verify_url=', verify_url, 'VERIFY_SECRET_set=', bool(VERIFY_SECRET))
         return None
 
+    payload = {'s3_key': s3_key}
+    if file_size_bytes is not None:
+        payload['file_size_bytes'] = int(file_size_bytes)
+    if bucket:
+        payload['bucket'] = bucket
+
     try:
-        status, body = http_post_json(BACKEND_VERIFY_URL, {'s3_key': s3_key}, headers={'X-Verify-Token': VERIFY_SECRET})
+        status, body = http_post_json(verify_url, payload, headers={'X-Verify-Token': VERIFY_SECRET})
         print('verify response', status, body)
         return body
     except urllib.error.HTTPError as e:
@@ -78,7 +120,7 @@ def call_backend_verify(s3_key: str):
 def patch_status_by_id(backend_base: str, file_id: int, status: str):
     url = f"{backend_base.rstrip('/')}/files/{file_id}/status"
     try:
-        status_code, body = http_post_json(url, {'status': status})
+        status_code, body = http_post_json(url, {'status': status}, method='PATCH')
         print('patched status', file_id, status_code, body)
         return True
     except Exception as e:
@@ -156,14 +198,14 @@ def handle_record(bucket: str, key: str):
     except ClientError as e:
         print('head_object failed', e)
         # notify backend if possible
-        call_backend_verify(key)
+        call_backend_verify(key, None, bucket)
         return
 
     size = head.get('ContentLength', 0)
     if size == 0:
         print('Empty file detected')
         # Call backend verify to mark record; if exists, patch to failed
-        resp = call_backend_verify(key)
+        resp = call_backend_verify(key, size, bucket)
         if resp and isinstance(resp, dict) and resp.get('id'):
             try:
                 patch_status_by_id(BACKEND_BASE_URL, resp['id'], 'failed')
@@ -181,11 +223,13 @@ def handle_record(bucket: str, key: str):
         summary['bucket'] = bucket
         summary['file_size'] = size
         summary['processed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-        # write summary JSON next to the CSV file
-        summary_key = f"{key}.summary.json"
+        # write summary JSON into a `summaries/` subfolder next to the CSV
+        summary_key = summary_key_for_csv(key)
+        # Allow storing summaries in a separate bucket when configured.
+        target_summary_bucket = SUMMARY_BUCKET_NAME or bucket
         try:
-            s3_client.put_object(Bucket=bucket, Key=summary_key, Body=json.dumps(summary), ContentType='application/json')
-            print('Wrote summary to', summary_key)
+            s3_client.put_object(Bucket=target_summary_bucket, Key=summary_key, Body=json.dumps(summary), ContentType='application/json')
+            print('Wrote summary to', f's3://{target_summary_bucket}/{summary_key}')
         except Exception as e:
             print('Failed to write summary', e)
     except Exception as e:
@@ -199,7 +243,7 @@ def handle_record(bucket: str, key: str):
                 print('copy_to_failed error', ex)
 
         # Call backend verify to ensure a DB record exists, then mark as failed
-        resp = call_backend_verify(key)
+        resp = call_backend_verify(key, size, bucket)
         if resp and isinstance(resp, dict) and resp.get('id'):
             try:
                 patch_status_by_id(BACKEND_BASE_URL, resp['id'], 'failed')
@@ -208,7 +252,7 @@ def handle_record(bucket: str, key: str):
         return
 
     # 3. If validation passes, call backend verify to mark verified
-    resp = call_backend_verify(key)
+    resp = call_backend_verify(key, size, bucket)
     print('Processing complete for', key, 'verify response', resp)
 
 
@@ -217,12 +261,32 @@ def lambda_handler(event, context):
     records = event.get('Records', [])
     for r in records:
         try:
-            s3 = r.get('s3', {})
-            bucket = s3.get('bucket', {}).get('name')
-            key = s3.get('object', {}).get('key')
+            # Support both direct S3 event (when Lambda is invoked by S3)
+            # and SQS-wrapped S3 event (when S3 posts to SQS and Lambda polls SQS).
+            bucket = None
+            key = None
+            if 'body' in r and isinstance(r['body'], str):
+                try:
+                    inner = json.loads(r['body'])
+                    # inner is typically an S3 event with its own Records array
+                    inner_rec = inner.get('Records', [None])[0]
+                    if inner_rec:
+                        s3 = inner_rec.get('s3', {})
+                        bucket = s3.get('bucket', {}).get('name')
+                        key = s3.get('object', {}).get('key')
+                except Exception:
+                    pass
+            # Fallback: direct S3 event structure
+            if not key or not bucket:
+                s3 = r.get('s3', {})
+                bucket = s3.get('bucket', {}).get('name')
+                key = s3.get('object', {}).get('key')
             if not key or not bucket:
                 continue
             key = urllib.parse.unquote_plus(key)
+            if should_skip_key(key):
+                print('Skipping generated/failed artifact key:', key)
+                continue
             handle_record(bucket, key)
         except Exception as e:
             print('Error processing record', e)

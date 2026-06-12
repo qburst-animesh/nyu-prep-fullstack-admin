@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, DateTime, BigInteger, Boolean
-from datetime import datetime
+from datetime import datetime, timezone
 from .database import Base
 
 class CSVFile(Base):
@@ -19,5 +19,5 @@ class CSVFile(Base):
     delete_attempts = Column(Integer, default=0)
     delete_last_error = Column(String, nullable=True)
     delete_completed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
